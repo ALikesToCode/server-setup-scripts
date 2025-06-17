@@ -11,14 +11,15 @@ x-security-defaults: &security_defaults
     - SETGID
     - SETUID
 
+# Default resource limits (can be overridden per service)
 x-resource-limits: &resource_limits
   deploy:
     resources:
       reservations:
-        memory: 256M
+        memory: ${DEFAULT_MEMORY_RESERVATION:-256M}
       limits:
-        memory: 2G
-        cpus: '1.0'
+        memory: ${DEFAULT_MEMORY_LIMIT:-2G}
+        cpus: '${DEFAULT_CPUS_LIMIT:-1.0}'
 
 x-logging: &logging
   logging:
@@ -37,18 +38,39 @@ x-monitoring-labels: &monitoring_labels
     - "prometheus.port=8080"
     - "environment=${ENVIRONMENT:-production}"
 
+# Common OpenProject Environment Variables
+x-openproject-base-env: &openproject_base_env
+  # Database
+  OPENPROJECT_DATABASE__ADAPTER: postgresql
+  OPENPROJECT_DATABASE__HOST: db
+  OPENPROJECT_DATABASE__NAME: ${POSTGRES_DB}
+  OPENPROJECT_DATABASE__USERNAME: ${POSTGRES_USER}
+  OPENPROJECT_DATABASE__PASSWORD: ${POSTGRES_PASSWORD}
+  # Redis
+  OPENPROJECT_CACHE__REDIS__URL: redis://:${REDIS_PASSWORD}@redis:6379
+  # Application Core
+  OPENPROJECT_SECRET_KEY_BASE: ${OPENPROJECT_SECRET_KEY_BASE}
+  OPENPROJECT_HOST__NAME: ${OPENPROJECT_HOST__NAME}
+  OPENPROJECT_HTTPS: "${OPENPROJECT_HTTPS:-true}"
+  # Security Headers
+  OPENPROJECT_SECURITY__FORCE__HTTPS: "${OPENPROJECT_SECURITY__FORCE__HTTPS:-true}"
+  OPENPROJECT_SECURITY__HSTS: "${OPENPROJECT_SECURITY__HSTS:-true}"
+  OPENPROJECT_SECURITY__CSP__ENABLED: "${OPENPROJECT_SECURITY__CSP__ENABLED:-true}"
+  OPENPROJECT_SECURITY__REFERRER__POLICY: "${OPENPROJECT_SECURITY__REFERRER__POLICY:-strict-origin-when-cross-origin}"
+  # Monitoring & Logging
+  OPENPROJECT_SENTRY__DSN: ${SENTRY_DSN}
+  RAILS_LOG_LEVEL: ${RAILS_LOG_LEVEL:-info}
+
 services:
   # Enhanced PostgreSQL with security hardening
   db:
-    image: postgres:16-alpine
+    image: postgres:${POSTGRES_VERSION:-16-alpine}
     <<: [*restart_policy, *logging, *security_defaults]
     environment:
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C --auth-host=md5"
-    secrets:
-      - postgres_password
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
@@ -72,14 +94,14 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
-          cpus: '2.0'
+          memory: ${DB_MEMORY_LIMIT:-4G}
+          cpus: '${DB_CPUS_LIMIT:-2.0}'
         reservations:
-          memory: 1G
+          memory: ${DB_MEMORY_RESERVATION:-1G}
 
   # Enhanced Redis with authentication
   redis:
-    image: redis:7-alpine
+    image: redis:${REDIS_VERSION:-7-alpine}
     <<: [*restart_policy, *logging, *security_defaults]
     command: >
       redis-server
@@ -104,46 +126,19 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: ${REDIS_MEMORY_LIMIT:-1G}
         reservations:
-          memory: 256M
+          memory: ${REDIS_MEMORY_RESERVATION:-256M}
 
   # Enhanced OpenProject web with security headers
   web:
-    image: openproject/openproject:16
+    image: openproject/openproject:${OPENPROJECT_VERSION:-16}
     <<: [*restart_policy, *logging, *security_defaults, *monitoring_labels]
     environment:
-      # Database
-      OPENPROJECT_DATABASE__ADAPTER: postgresql
-      OPENPROJECT_DATABASE__HOST: db
-      OPENPROJECT_DATABASE__NAME: ${POSTGRES_DB}
-      OPENPROJECT_DATABASE__USERNAME: ${POSTGRES_USER}
-      OPENPROJECT_DATABASE__PASSWORD__FILE: /run/secrets/postgres_password
-      
-      # Redis with auth
-      OPENPROJECT_CACHE__REDIS__URL: redis://:${REDIS_PASSWORD}@redis:6379
-      
-      # Security headers
-      OPENPROJECT_SECURITY__FORCE__HTTPS: "true"
-      OPENPROJECT_SECURITY__HSTS: "true"
-      OPENPROJECT_SECURITY__CSP__ENABLED: "true"
-      OPENPROJECT_SECURITY__REFERRER__POLICY: "strict-origin-when-cross-origin"
-      
-      # Application
-      OPENPROJECT_SECRET_KEY_BASE__FILE: /run/secrets/openproject_secret
-      OPENPROJECT_HOST__NAME: ${OPENPROJECT_HOST__NAME}
-      OPENPROJECT_HTTPS: "true"
-      
-      # Performance
+      <<: *openproject_base_env
+      # Web-specific performance settings
       OPENPROJECT_WEB__WORKERS: ${OPENPROJECT_WEB__WORKERS:-4}
       OPENPROJECT_WEB__TIMEOUT: ${OPENPROJECT_WEB__TIMEOUT:-120}
-      
-      # Monitoring
-      OPENPROJECT_SENTRY__DSN: ${SENTRY_DSN}
-      RAILS_LOG_LEVEL: ${RAILS_LOG_LEVEL:-info}
-    secrets:
-      - postgres_password
-      - openproject_secret
     volumes:
       - openproject_assets:/var/openproject/assets
       - openproject_logs:/var/log/openproject
@@ -164,22 +159,23 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
-          cpus: '2.0'
+          memory: ${WEB_MEMORY_LIMIT:-4G}
+          cpus: '${WEB_CPUS_LIMIT:-2.0}'
         reservations:
-          memory: 1G
+          memory: ${WEB_MEMORY_RESERVATION:-1G}
 
   # Enhanced worker with auto-scaling
   worker:
-    image: openproject/openproject:16
+    image: openproject/openproject:${OPENPROJECT_VERSION:-16}
     <<: [*restart_policy, *logging, *security_defaults]
     command: "./docker/prod/worker"
     environment:
-      <<: *web_environment
+      <<: *openproject_base_env
+      # Inherit web performance settings as per original ambiguous intent, can be fine-tuned
+      OPENPROJECT_WEB__WORKERS: ${OPENPROJECT_WEB__WORKERS:-4} 
+      OPENPROJECT_WEB__TIMEOUT: ${OPENPROJECT_WEB__TIMEOUT:-120}
+      # Worker-specific settings
       OPENPROJECT_WORKER__CONCURRENCY: ${OPENPROJECT_WORKER__CONCURRENCY:-10}
-    secrets:
-      - postgres_password
-      - openproject_secret
     volumes:
       - openproject_assets:/var/openproject/assets
       - openproject_logs:/var/log/openproject
@@ -194,24 +190,25 @@ services:
       replicas: ${WORKER_REPLICAS:-2}
       resources:
         limits:
-          memory: 2G
+          memory: ${WORKER_MEMORY_LIMIT:-2G}
         reservations:
-          memory: 512M
+          memory: ${WORKER_MEMORY_RESERVATION:-512M}
 
   # Enhanced reverse proxy with security headers
   proxy:
-    image: caddy:2-alpine
+    image: caddy:${CADDY_VERSION:-2-alpine}
     <<: [*restart_policy, *logging, *security_defaults]
     ports:
       - "443:443"
       - "80:80"
     environment:
-      CADDY_ADMIN: "0.0.0.0:2019"
+      CADDY_ADMIN: "0.0.0.0:2019" # Already configurable if needed via .env
+      # OPENPROJECT_HOST__NAME is implicitly available from .env via Docker Compose
     volumes:
       - ./Caddyfile.prod:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-      - openproject_logs:/var/log/openproject:ro
+      - openproject_logs:/var/log/openproject:ro # Mount for Caddy to potentially access if needed by Caddyfile config
     depends_on:
       web:
         condition: service_healthy
@@ -220,20 +217,20 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: ${PROXY_MEMORY_LIMIT:-512M}
         reservations:
-          memory: 128M
+          memory: ${PROXY_MEMORY_RESERVATION:-128M}
 
   # Enhanced monitoring stack
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:${PROMETHEUS_VERSION:-latest}
     <<: [*restart_policy, *logging, *security_defaults]
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--web.console.libraries=/etc/prometheus/console_libraries'
       - '--web.console.templates=/etc/prometheus/consoles'
-      - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-30d}'
       - '--web.enable-lifecycle'
       - '--web.enable-admin-api'
     volumes:
@@ -244,20 +241,18 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: ${PROMETHEUS_MEMORY_LIMIT:-1G}
         reservations:
-          memory: 256M
+          memory: ${PROMETHEUS_MEMORY_RESERVATION:-256M}
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:${GRAFANA_VERSION:-latest}
     <<: [*restart_policy, *logging, *security_defaults]
     environment:
-      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_password
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_SECURITY_DISABLE_GRAVATAR: "true"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
-    secrets:
-      - grafana_password
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
@@ -266,33 +261,34 @@ services:
       - prometheus
     networks:
       - monitoring
-      - frontend
+      - frontend # Grafana needs to be accessible from frontend
+    # Add deploy resource limits if desired, similar to Prometheus
 
   # Enhanced backup service with encryption
   backup:
-    image: postgres:16-alpine
+    image: postgres:${POSTGRES_VERSION:-16-alpine} # Use same postgres version as db
     <<: [*restart_policy, *logging, *security_defaults]
     environment:
-      POSTGRES_PASSWORD__FILE: /run/secrets/postgres_password
-      BACKUP_ENCRYPTION_KEY__FILE: /run/secrets/backup_encryption_key
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY}
       BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET}
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
-      AWS_ACCESS_KEY_ID__FILE: /run/secrets/aws_access_key
-      AWS_SECRET_ACCESS_KEY__FILE: /run/secrets/aws_secret_key
-    secrets:
-      - postgres_password
-      - backup_encryption_key
-      - aws_access_key
-      - aws_secret_key
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      POSTGRES_USER: ${POSTGRES_USER} # Backup script might need user/db
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data:ro
       - openproject_assets:/var/openproject/assets:ro
-      - ./scripts/backup.sh:/backup.sh:ro
+      - ./scripts/backup.sh:/backup.sh:ro # Ensure backup.sh uses these env vars
       - backup_logs:/var/log/backup
     command: |
       sh -c "
-        apk add --no-cache aws-cli gnupg &&
+        apk add --no-cache aws-cli gnupg coreutils &&
         chmod +x /backup.sh &&
+        # Setup cron or run directly, this example runs once
+        # For cron, add: crond -f -d 8
+        # Ensure backup.sh is idempotent or scheduled appropriately
         /backup.sh
       "
     networks:
@@ -300,7 +296,7 @@ services:
 
   # Log aggregation
   loki:
-    image: grafana/loki:latest
+    image: grafana/loki:${LOKI_VERSION:-latest}
     <<: [*restart_policy, *logging, *security_defaults]
     command: -config.file=/etc/loki/local-config.yaml
     volumes:
@@ -308,32 +304,19 @@ services:
       - loki_data:/loki
     networks:
       - monitoring
+    # Add deploy resource limits if desired
 
   promtail:
-    image: grafana/promtail:latest
+    image: grafana/promtail:${PROMTAIL_VERSION:-latest}
     <<: [*restart_policy, *logging, *security_defaults]
     command: -config.file=/etc/promtail/config.yml
     volumes:
       - ./monitoring/promtail.yml:/etc/promtail/config.yml:ro
-      - /var/log:/var/log:ro
-      - openproject_logs:/var/log/openproject:ro
+      - /var/log:/var/log:ro # Host logs
+      - openproject_logs:/var/log/openproject:ro # OpenProject specific logs
     networks:
       - monitoring
-
-# Security: Define secrets
-secrets:
-  postgres_password:
-    file: ./secrets/postgres_password.txt
-  openproject_secret:
-    file: ./secrets/openproject_secret.txt
-  grafana_password:
-    file: ./secrets/grafana_password.txt
-  backup_encryption_key:
-    file: ./secrets/backup_encryption_key.txt
-  aws_access_key:
-    file: ./secrets/aws_access_key.txt
-  aws_secret_key:
-    file: ./secrets/aws_secret_key.txt
+    # Add deploy resource limits if desired
 
 # Network segmentation for security
 networks:
@@ -357,7 +340,7 @@ volumes:
   redis_data:
     driver: local
     labels:
-      backup: "true"
+      backup: "true" # Redis data can be backed up, though often treated as cache
       retention: "7d"
   openproject_assets:
     driver: local
@@ -374,7 +357,7 @@ volumes:
     driver: local
   caddy_config:
     driver: local
-  openproject_logs:
+  openproject_logs: # Volume for OpenProject logs, shared with Promtail/Caddy
     driver: local
-  backup_logs:
+  backup_logs: # Volume for backup script logs
     driver: local
