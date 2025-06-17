@@ -1,0 +1,170 @@
+version: "3.8"
+
+x-op-restart-policy: &restart_policy
+  restart: unless-stopped
+
+x-op-image: &image
+  image: openproject/openproject:16
+
+x-op-app: &app
+  <<: [*image, *restart_policy]
+  environment: &app_environment
+    # Database configuration
+    OPENPROJECT_DATABASE__ADAPTER: postgresql
+    OPENPROJECT_DATABASE__HOST: db
+    OPENPROJECT_DATABASE__PORT: 5432
+    OPENPROJECT_DATABASE__NAME: ${POSTGRES_DB:-openproject}
+    OPENPROJECT_DATABASE__USERNAME: ${POSTGRES_USER:-postgres}
+    OPENPROJECT_DATABASE__PASSWORD: ${POSTGRES_PASSWORD:-p4ssw0rd}
+    
+    # Redis configuration
+    OPENPROJECT_CACHE__REDIS__URL: redis://cache:6379
+    OPENPROJECT_RAILS__CACHE__STORE: redis
+    OPENPROJECT_RAILS__RELATIVE__URL__ROOT: ${OPENPROJECT_RAILS__RELATIVE__URL__ROOT:-""}
+    
+    # Application configuration
+    OPENPROJECT_RAILS__ENFORCE__SSL: ${OPENPROJECT_HTTPS:-true}
+    OPENPROJECT_RAILS__ASSUME__SSL: ${OPENPROJECT_HTTPS:-true}
+    OPENPROJECT_HOST__NAME: ${OPENPROJECT_HOST__NAME:-localhost:8080}
+    OPENPROJECT_HTTPS: ${OPENPROJECT_HTTPS:-true}
+    OPENPROJECT_SECRET_KEY_BASE: ${OPENPROJECT_SECRET_KEY_BASE}
+    
+    # Email configuration (optional)
+    OPENPROJECT_EMAIL__DELIVERY__METHOD: ${OPENPROJECT_EMAIL__DELIVERY__METHOD:-smtp}
+    OPENPROJECT_SMTP__ADDRESS: ${OPENPROJECT_SMTP__ADDRESS}
+    OPENPROJECT_SMTP__PORT: ${OPENPROJECT_SMTP__PORT:-587}
+    OPENPROJECT_SMTP__DOMAIN: ${OPENPROJECT_SMTP__DOMAIN}
+    OPENPROJECT_SMTP__AUTHENTICATION: ${OPENPROJECT_SMTP__AUTHENTICATION:-login}
+    OPENPROJECT_SMTP__USER__NAME: ${OPENPROJECT_SMTP__USER__NAME}
+    OPENPROJECT_SMTP__PASSWORD: ${OPENPROJECT_SMTP__PASSWORD}
+    OPENPROJECT_SMTP__ENABLE__STARTTLS__AUTO: ${OPENPROJECT_SMTP__ENABLE__STARTTLS__AUTO:-true}
+    
+  volumes:
+    - "${OPDATA}/assets:/var/openproject/assets"
+  depends_on:
+    - db
+    - cache
+
+services:
+  # PostgreSQL Database (Latest version)
+  db:
+    image: postgres:16
+    <<: *restart_policy
+    stop_grace_period: "3s"
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-p4ssw0rd}
+      POSTGRES_DB: ${POSTGRES_DB:-openproject}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+    volumes:
+      - "${OPDATA}/pgdata:/var/lib/postgresql/data"
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c work_mem=4MB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+
+  # Redis Cache
+  cache:
+    image: redis:7-alpine
+    <<: *restart_policy
+    stop_grace_period: "3s"
+    volumes:
+      - "${OPDATA}/redis:/data"
+    command: redis-server --appendonly yes
+
+  # Proxy/Load Balancer
+  proxy:
+    image: caddy:2-alpine
+    <<: *restart_policy
+    ports:
+      - "${PORT:-8080}:80"
+    environment:
+      OPENPROJECT_RAILS__RELATIVE__URL__ROOT: ${OPENPROJECT_RAILS__RELATIVE__URL__ROOT:-""}
+    volumes:
+      - "${OPDATA}/caddy:/data/caddy"
+    depends_on:
+      - web
+
+  # Main Web Application
+  web:
+    <<: *app
+    command: "./docker/prod/web"
+    ports: []
+    labels:
+      - autoheal=true
+
+  # Background Worker
+  worker:
+    <<: *app
+    command: "./docker/prod/worker"
+    ports: []
+    labels:
+      - autoheal=true
+
+  # Scheduled Jobs
+  cron:
+    <<: *app
+    command: "./docker/prod/cron"
+    ports: []
+    labels:
+      - autoheal=true
+
+  # Database Seeder (runs once)
+  seeder:
+    <<: *app
+    command: "./docker/prod/seeder"
+    restart: "no"
+    depends_on:
+      - db
+
+  # Cloudflare Tunnel
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    <<: *restart_policy
+    container_name: cloudflare-tunnel
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    depends_on:
+      - proxy
+
+  # Watchtower for Auto-Updates
+  watchtower:
+    image: containrrr/watchtower:latest
+    <<: *restart_policy
+    container_name: watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=43200  # 12 hours
+      - WATCHTOWER_INCLUDE_STOPPED=true
+      - WATCHTOWER_REVIVE_STOPPED=false
+    command: --cleanup --interval 43200
+
+  # Auto-heal for container health monitoring
+  autoheal:
+    image: willfarrell/autoheal:latest
+    <<: *restart_policy
+    container_name: autoheal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=5
+      - AUTOHEAL_START_PERIOD=0
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=10
+
+volumes:
+  opdata:
+  pgdata:
+  assets:
+  redis:
+  caddy:
