@@ -40,10 +40,12 @@ x-op-app: &app
     OPENPROJECT_SMTP__ENABLE__STARTTLS__AUTO: ${OPENPROJECT_SMTP__ENABLE__STARTTLS__AUTO:-true}
     
   volumes:
-    - "${OPDATA}/assets:/var/openproject/assets"
+    - "opdata_assets:/var/openproject/assets"
   depends_on:
-    - db
-    - cache
+    db:
+      condition: service_healthy
+    cache:
+      condition: service_healthy
 
 services:
   # PostgreSQL Database (Latest version)
@@ -56,7 +58,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-openproject}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
     volumes:
-      - "${OPDATA}/pgdata:/var/lib/postgresql/data"
+      - "opdata_pgdata:/var/lib/postgresql/data"
     command: >
       postgres
       -c shared_preload_libraries=pg_stat_statements
@@ -69,6 +71,12 @@ services:
       -c checkpoint_completion_target=0.9
       -c wal_buffers=16MB
       -c default_statistics_target=100
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-openproject}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   # Redis Cache
   cache:
@@ -76,8 +84,14 @@ services:
     <<: *restart_policy
     stop_grace_period: "3s"
     volumes:
-      - "${OPDATA}/redis:/data"
+      - "opdata_redis:/data"
     command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # Proxy/Load Balancer
   proxy:
@@ -88,9 +102,16 @@ services:
     environment:
       OPENPROJECT_RAILS__RELATIVE__URL__ROOT: ${OPENPROJECT_RAILS__RELATIVE__URL__ROOT:-""}
     volumes:
-      - "${OPDATA}/caddy:/data/caddy"
+      - "opdata_caddy:/data/caddy"
     depends_on:
-      - web
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # Main Web Application
   web:
@@ -99,6 +120,12 @@ services:
     ports: []
     labels:
       - autoheal=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health_checks/default"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Background Worker
   worker:
@@ -107,6 +134,9 @@ services:
     ports: []
     labels:
       - autoheal=true
+    depends_on:
+      web:
+        condition: service_healthy
 
   # Scheduled Jobs
   cron:
@@ -115,6 +145,9 @@ services:
     ports: []
     labels:
       - autoheal=true
+    depends_on:
+      web:
+        condition: service_healthy
 
   # Database Seeder (runs once)
   seeder:
@@ -122,24 +155,28 @@ services:
     command: "./docker/prod/seeder"
     restart: "no"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
-  # Cloudflare Tunnel
+  # Cloudflare Tunnel (optional - only if TUNNEL_TOKEN is set)
   tunnel:
     image: cloudflare/cloudflared:latest
     <<: *restart_policy
-    container_name: cloudflare-tunnel
+    container_name: openproject-cloudflare-tunnel
     command: tunnel run
     environment:
       - TUNNEL_TOKEN=${TUNNEL_TOKEN}
     depends_on:
-      - proxy
+      proxy:
+        condition: service_healthy
+    profiles:
+      - tunnel
 
-  # Watchtower for Auto-Updates
+  # Watchtower for Auto-Updates (optional)
   watchtower:
     image: containrrr/watchtower:latest
     <<: *restart_policy
-    container_name: watchtower
+    container_name: openproject-watchtower
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -147,13 +184,16 @@ services:
       - WATCHTOWER_POLL_INTERVAL=43200  # 12 hours
       - WATCHTOWER_INCLUDE_STOPPED=true
       - WATCHTOWER_REVIVE_STOPPED=false
-    command: --cleanup --interval 43200
+      - WATCHTOWER_SCOPE=openproject
+    command: --cleanup --interval 43200 --scope openproject
+    profiles:
+      - watchtower
 
-  # Auto-heal for container health monitoring
+  # Auto-heal for container health monitoring (optional)
   autoheal:
     image: willfarrell/autoheal:latest
     <<: *restart_policy
-    container_name: autoheal
+    container_name: openproject-autoheal
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -161,10 +201,15 @@ services:
       - AUTOHEAL_INTERVAL=5
       - AUTOHEAL_START_PERIOD=0
       - AUTOHEAL_DEFAULT_STOP_TIMEOUT=10
+    profiles:
+      - autoheal
 
 volumes:
-  opdata:
-  pgdata:
-  assets:
-  redis:
-  caddy:
+  opdata_assets:
+    name: openproject_assets
+  opdata_pgdata:
+    name: openproject_pgdata
+  opdata_redis:
+    name: openproject_redis
+  opdata_caddy:
+    name: openproject_caddy
