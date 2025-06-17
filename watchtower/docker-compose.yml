@@ -1,0 +1,12 @@
+version: "3"
+services:
+  watchtower:
+    image: containrrr/watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=10800  # 3 hours
+    command: --cleanup --interval 10800
+    restart: always
+    container_name: watchtower
