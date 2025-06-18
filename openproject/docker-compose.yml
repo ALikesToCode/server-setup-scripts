@@ -54,6 +54,15 @@ x-openproject-base-env: &openproject_base_env
   # Security Headers (Cloudflare Tunnel handles HTTPS)
   OPENPROJECT_SECURITY__FORCE__HTTPS: "${OPENPROJECT_SECURITY__FORCE__HTTPS:-false}"
   OPENPROJECT_SECURITY__HSTS: "${OPENPROJECT_SECURITY__HSTS:-false}"
+  # Email Configuration
+  OPENPROJECT_EMAIL__DELIVERY__METHOD: ${OPENPROJECT_EMAIL__DELIVERY__METHOD:-smtp}
+  OPENPROJECT_SMTP__ADDRESS: ${OPENPROJECT_SMTP__ADDRESS}
+  OPENPROJECT_SMTP__PORT: ${OPENPROJECT_SMTP__PORT:-587}
+  OPENPROJECT_SMTP__DOMAIN: ${OPENPROJECT_SMTP__DOMAIN}
+  OPENPROJECT_SMTP__USER__NAME: ${OPENPROJECT_SMTP__USER__NAME}
+  OPENPROJECT_SMTP__PASSWORD: ${OPENPROJECT_SMTP__PASSWORD}
+  OPENPROJECT_SMTP__ENABLE__STARTTLS__AUTO: ${OPENPROJECT_SMTP__ENABLE__STARTTLS__AUTO:-true}
+  OPENPROJECT_SMTP__AUTHENTICATION: ${OPENPROJECT_SMTP__AUTHENTICATION:-login}
   # Logging
   RAILS_LOG_LEVEL: ${RAILS_LOG_LEVEL:-info}
 
@@ -115,7 +124,7 @@ services:
     image: openproject/openproject:${OPENPROJECT_VERSION:-16}
     <<: [*restart_policy, *logging, *security_defaults]
     ports:
-      - "${OPENPROJECT_PORT:-8080}:8080"
+      - "${PORT:-8080}:8080"
     environment:
       <<: *openproject_base_env
       # Performance settings
