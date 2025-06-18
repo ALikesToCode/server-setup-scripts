@@ -26,8 +26,7 @@ x-logging: &logging
     driver: "json-file"
     options:
       max-size: "10m"
-      max-file: "5"
-      labels: "service,environment"
+      max-file: "3"
 
 x-restart-policy: &restart_policy
   restart: unless-stopped
@@ -52,17 +51,14 @@ x-openproject-base-env: &openproject_base_env
   OPENPROJECT_SECRET_KEY_BASE: ${OPENPROJECT_SECRET_KEY_BASE}
   OPENPROJECT_HOST__NAME: ${OPENPROJECT_HOST__NAME}
   OPENPROJECT_HTTPS: "${OPENPROJECT_HTTPS:-true}"
-  # Security Headers
-  OPENPROJECT_SECURITY__FORCE__HTTPS: "${OPENPROJECT_SECURITY__FORCE__HTTPS:-true}"
-  OPENPROJECT_SECURITY__HSTS: "${OPENPROJECT_SECURITY__HSTS:-true}"
-  OPENPROJECT_SECURITY__CSP__ENABLED: "${OPENPROJECT_SECURITY__CSP__ENABLED:-true}"
-  OPENPROJECT_SECURITY__REFERRER__POLICY: "${OPENPROJECT_SECURITY__REFERRER__POLICY:-strict-origin-when-cross-origin}"
-  # Monitoring & Logging
-  OPENPROJECT_SENTRY__DSN: ${SENTRY_DSN}
+  # Security Headers (Cloudflare Tunnel handles HTTPS)
+  OPENPROJECT_SECURITY__FORCE__HTTPS: "${OPENPROJECT_SECURITY__FORCE__HTTPS:-false}"
+  OPENPROJECT_SECURITY__HSTS: "${OPENPROJECT_SECURITY__HSTS:-false}"
+  # Logging
   RAILS_LOG_LEVEL: ${RAILS_LOG_LEVEL:-info}
 
 services:
-  # Enhanced PostgreSQL with security hardening
+  # PostgreSQL Database
   db:
     image: postgres:${POSTGRES_VERSION:-16-alpine}
     <<: [*restart_policy, *logging, *security_defaults]
@@ -70,19 +66,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C --auth-host=md5"
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./postgres/init:/docker-entrypoint-initdb.d:ro
-      - ./postgres/conf:/etc/postgresql:ro
-    command: >
-      postgres
-      -c config_file=/etc/postgresql/postgresql.conf
-      -c shared_preload_libraries=pg_stat_statements,pg_stat_monitor
-      -c logging_collector=on
-      -c log_directory=/var/log/postgresql
-      -c log_statement=mod
-      -c log_min_duration_statement=1000
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 30s
@@ -94,12 +80,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${DB_MEMORY_LIMIT:-4G}
-          cpus: '${DB_CPUS_LIMIT:-2.0}'
+          memory: ${DB_MEMORY_LIMIT:-2G}
         reservations:
-          memory: ${DB_MEMORY_RESERVATION:-1G}
+          memory: ${DB_MEMORY_RESERVATION:-512M}
 
-  # Enhanced Redis with authentication
+  # Redis Cache
   redis:
     image: redis:${REDIS_VERSION:-7-alpine}
     <<: [*restart_policy, *logging, *security_defaults]
@@ -107,15 +92,10 @@ services:
       redis-server
       --requirepass ${REDIS_PASSWORD}
       --appendonly yes
-      --appendfsync everysec
       --maxmemory ${REDIS_MAXMEMORY:-512mb}
       --maxmemory-policy allkeys-lru
-      --save 900 1
-      --save 300 10
-      --save 60 10000
     volumes:
       - redis_data:/data
-      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
     healthcheck:
       test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 30s
@@ -130,18 +110,19 @@ services:
         reservations:
           memory: ${REDIS_MEMORY_RESERVATION:-256M}
 
-  # Enhanced OpenProject web with security headers
+  # OpenProject Web Application
   web:
     image: openproject/openproject:${OPENPROJECT_VERSION:-16}
-    <<: [*restart_policy, *logging, *security_defaults, *monitoring_labels]
+    <<: [*restart_policy, *logging, *security_defaults]
+    ports:
+      - "${OPENPROJECT_PORT:-8080}:8080"
     environment:
       <<: *openproject_base_env
-      # Web-specific performance settings
+      # Performance settings
       OPENPROJECT_WEB__WORKERS: ${OPENPROJECT_WEB__WORKERS:-4}
       OPENPROJECT_WEB__TIMEOUT: ${OPENPROJECT_WEB__TIMEOUT:-120}
     volumes:
       - openproject_assets:/var/openproject/assets
-      - openproject_logs:/var/log/openproject
     depends_on:
       db:
         condition: service_healthy
@@ -154,31 +135,24 @@ services:
       retries: 3
       start_period: 120s
     networks:
-      - frontend
       - backend
     deploy:
       resources:
         limits:
-          memory: ${WEB_MEMORY_LIMIT:-4G}
-          cpus: '${WEB_CPUS_LIMIT:-2.0}'
+          memory: ${WEB_MEMORY_LIMIT:-3G}
         reservations:
           memory: ${WEB_MEMORY_RESERVATION:-1G}
 
-  # Enhanced worker with auto-scaling
+  # OpenProject Background Worker
   worker:
     image: openproject/openproject:${OPENPROJECT_VERSION:-16}
     <<: [*restart_policy, *logging, *security_defaults]
     command: "./docker/prod/worker"
     environment:
       <<: *openproject_base_env
-      # Inherit web performance settings as per original ambiguous intent, can be fine-tuned
-      OPENPROJECT_WEB__WORKERS: ${OPENPROJECT_WEB__WORKERS:-4} 
-      OPENPROJECT_WEB__TIMEOUT: ${OPENPROJECT_WEB__TIMEOUT:-120}
-      # Worker-specific settings
       OPENPROJECT_WORKER__CONCURRENCY: ${OPENPROJECT_WORKER__CONCURRENCY:-10}
     volumes:
       - openproject_assets:/var/openproject/assets
-      - openproject_logs:/var/log/openproject
     depends_on:
       db:
         condition: service_healthy
@@ -187,142 +161,15 @@ services:
     networks:
       - backend
     deploy:
-      replicas: ${WORKER_REPLICAS:-2}
+      replicas: ${WORKER_REPLICAS:-1}
       resources:
         limits:
           memory: ${WORKER_MEMORY_LIMIT:-2G}
         reservations:
           memory: ${WORKER_MEMORY_RESERVATION:-512M}
 
-  # Enhanced reverse proxy with security headers
-  proxy:
-    image: caddy:${CADDY_VERSION:-2-alpine}
-    <<: [*restart_policy, *logging, *security_defaults]
-    ports:
-      - "443:443"
-      - "80:80"
-    environment:
-      CADDY_ADMIN: "0.0.0.0:2019" # Already configurable if needed via .env
-      # OPENPROJECT_HOST__NAME is implicitly available from .env via Docker Compose
-    volumes:
-      - ./Caddyfile.prod:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-      - openproject_logs:/var/log/openproject:ro # Mount for Caddy to potentially access if needed by Caddyfile config
-    depends_on:
-      web:
-        condition: service_healthy
-    networks:
-      - frontend
-    deploy:
-      resources:
-        limits:
-          memory: ${PROXY_MEMORY_LIMIT:-512M}
-        reservations:
-          memory: ${PROXY_MEMORY_RESERVATION:-128M}
-
-  # Enhanced monitoring stack
-  prometheus:
-    image: prom/prometheus:${PROMETHEUS_VERSION:-latest}
-    <<: [*restart_policy, *logging, *security_defaults]
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/etc/prometheus/console_libraries'
-      - '--web.console.templates=/etc/prometheus/consoles'
-      - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-30d}'
-      - '--web.enable-lifecycle'
-      - '--web.enable-admin-api'
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    networks:
-      - monitoring
-    deploy:
-      resources:
-        limits:
-          memory: ${PROMETHEUS_MEMORY_LIMIT:-1G}
-        reservations:
-          memory: ${PROMETHEUS_MEMORY_RESERVATION:-256M}
-
-  grafana:
-    image: grafana/grafana:${GRAFANA_VERSION:-latest}
-    <<: [*restart_policy, *logging, *security_defaults]
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD}
-      GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_SECURITY_DISABLE_GRAVATAR: "true"
-      GF_ANALYTICS_REPORTING_ENABLED: "false"
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
-    depends_on:
-      - prometheus
-    networks:
-      - monitoring
-      - frontend # Grafana needs to be accessible from frontend
-    # Add deploy resource limits if desired, similar to Prometheus
-
-  # Enhanced backup service with encryption
-  backup:
-    image: postgres:${POSTGRES_VERSION:-16-alpine} # Use same postgres version as db
-    <<: [*restart_policy, *logging, *security_defaults]
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY}
-      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET}
-      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      POSTGRES_USER: ${POSTGRES_USER} # Backup script might need user/db
-      POSTGRES_DB: ${POSTGRES_DB}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data:ro
-      - openproject_assets:/var/openproject/assets:ro
-      - ./scripts/backup.sh:/backup.sh:ro # Ensure backup.sh uses these env vars
-      - backup_logs:/var/log/backup
-    command: |
-      sh -c "
-        apk add --no-cache aws-cli gnupg coreutils &&
-        chmod +x /backup.sh &&
-        # Setup cron or run directly, this example runs once
-        # For cron, add: crond -f -d 8
-        # Ensure backup.sh is idempotent or scheduled appropriately
-        /backup.sh
-      "
-    networks:
-      - backend
-
-  # Log aggregation
-  loki:
-    image: grafana/loki:${LOKI_VERSION:-latest}
-    <<: [*restart_policy, *logging, *security_defaults]
-    command: -config.file=/etc/loki/local-config.yaml
-    volumes:
-      - ./monitoring/loki.yml:/etc/loki/local-config.yaml:ro
-      - loki_data:/loki
-    networks:
-      - monitoring
-    # Add deploy resource limits if desired
-
-  promtail:
-    image: grafana/promtail:${PROMTAIL_VERSION:-latest}
-    <<: [*restart_policy, *logging, *security_defaults]
-    command: -config.file=/etc/promtail/config.yml
-    volumes:
-      - ./monitoring/promtail.yml:/etc/promtail/config.yml:ro
-      - /var/log:/var/log:ro # Host logs
-      - openproject_logs:/var/log/openproject:ro # OpenProject specific logs
-    networks:
-      - monitoring
-    # Add deploy resource limits if desired
-
 # Network segmentation for security
 networks:
-  frontend:
-    driver: bridge
-    internal: false
   backend:
     driver: bridge
     internal: true
@@ -352,10 +199,6 @@ volumes:
   grafana_data:
     driver: local
   loki_data:
-    driver: local
-  caddy_data:
-    driver: local
-  caddy_config:
     driver: local
   openproject_logs: # Volume for OpenProject logs, shared with Promtail/Caddy
     driver: local
