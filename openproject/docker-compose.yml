@@ -1,5 +1,3 @@
-version: "3.8"
-
 # Security-focused shared configurations
 x-security-defaults: &security_defaults
   security_opt:

@@ -1,0 +1,10 @@
+# Allow .env file for OpenProject configuration
+# .env
+
+# But ignore other sensitive env files
+.env.local
+.env.*.local
+.env.production
+.env.staging
+.env.development
+*.env.backup
