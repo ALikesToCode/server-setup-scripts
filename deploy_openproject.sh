@@ -32,22 +32,25 @@ OLD_POSTGRES_VOLUME="openproject_postgres_data"
 OLD_REDIS_VOLUME="openproject_redis_data"
 OLD_ASSETS_VOLUME="openproject_openproject_assets"
 
+# Color codes for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Configuration
+ENV_FILE="openproject/.env"
+DATA_DIR="/opt/openproject_data"
+
 # --- Helper Functions ---
 ensure_docker_daemon() {
-    echo "INFO: Checking Docker daemon status..."
-    if ! sudo docker info > /dev/null 2>&1; then
-        echo "ERROR: Docker daemon is not running or not accessible."
-        echo "Attempting to start Docker service..."
-        sudo systemctl start docker
-        sleep 3 # Give it a moment
-        if ! sudo docker info > /dev/null 2>&1; then
-            echo "ERROR: Failed to start Docker. Please check Docker installation and ensure it's running."
-            exit 1
-        fi
-        echo "INFO: Docker daemon started successfully."
-    else
-        echo "INFO: Docker daemon is running."
+    echo -e "${BLUE}INFO: Checking Docker daemon status...${NC}"
+    if ! docker info >/dev/null 2>&1; then
+        echo -e "${RED}ERROR: Docker is not running. Please start Docker first.${NC}"
+        exit 1
     fi
+    echo -e "${GREEN}INFO: Docker daemon is running.${NC}"
 }
 
 setup_host_directories() {
@@ -113,11 +116,118 @@ show_logs() {
     fi
 }
 
+# Fix all permission issues for OpenProject containers
+fix_permissions() {
+    echo -e "${YELLOW}--- Fixing OpenProject Container Permissions ---${NC}"
+    echo -e "${BLUE}INFO: Applying comprehensive permission fixes...${NC}"
+    
+    # Create data directories if they don't exist
+    sudo mkdir -p ${DATA_DIR}/{assets,postgres,redis}
+    
+    # Fix 1: OpenProject assets directory (OpenProject containers run as user 1001:1001)
+    echo -e "${BLUE}INFO: Setting permissions for assets directory...${NC}"
+    sudo chown -R 1001:1001 ${DATA_DIR}/assets
+    sudo chmod -R 755 ${DATA_DIR}/assets
+    
+    # Fix 2: PostgreSQL data directory (PostgreSQL runs as user 70:70 in alpine container)
+    echo -e "${BLUE}INFO: Setting permissions for PostgreSQL directory...${NC}"
+    sudo chown -R 70:70 ${DATA_DIR}/postgres
+    sudo chmod -R 700 ${DATA_DIR}/postgres
+    
+    # Fix 3: Redis data directory (Redis runs as user 999:999)
+    echo -e "${BLUE}INFO: Setting permissions for Redis directory...${NC}"
+    sudo chown -R 999:999 ${DATA_DIR}/redis
+    sudo chmod -R 755 ${DATA_DIR}/redis
+    
+    echo -e "${GREEN}INFO: Permission fixes applied successfully.${NC}"
+    echo -e "${YELLOW}--- Permission Fixes Complete ---${NC}"
+}
+
+# Fix OpenProject container assets permissions (for running containers)
+fix_container_permissions() {
+    echo -e "${YELLOW}--- Fixing Container Internal Permissions ---${NC}"
+    echo -e "${BLUE}INFO: Fixing OpenProject container internal permissions...${NC}"
+    
+    # Check if containers are running
+    if docker ps | grep -q "openproject.*web"; then
+        echo -e "${BLUE}INFO: Fixing assets permissions inside web container...${NC}"
+        docker exec -u root $(docker ps -q -f name=openproject.*web) chown -R app:app /var/openproject/assets 2>/dev/null || true
+        
+        echo -e "${BLUE}INFO: Fixing temp directory permissions inside web container...${NC}"
+        docker exec -u root $(docker ps -q -f name=openproject.*web) chown -R app:app /app/tmp 2>/dev/null || true
+        docker exec -u root $(docker ps -q -f name=openproject.*web) mkdir -p /app/tmp/pids 2>/dev/null || true
+        docker exec -u root $(docker ps -q -f name=openproject.*web) chown -R app:app /app/tmp/pids 2>/dev/null || true
+    fi
+    
+    if docker ps | grep -q "openproject.*worker"; then
+        echo -e "${BLUE}INFO: Fixing assets permissions inside worker container...${NC}"
+        docker exec -u root $(docker ps -q -f name=openproject.*worker) chown -R app:app /var/openproject/assets 2>/dev/null || true
+        
+        echo -e "${BLUE}INFO: Fixing temp directory permissions inside worker container...${NC}"
+        docker exec -u root $(docker ps -q -f name=openproject.*worker) chown -R app:app /app/tmp 2>/dev/null || true
+        docker exec -u root $(docker ps -q -f name=openproject.*worker) mkdir -p /app/tmp/pids 2>/dev/null || true
+        docker exec -u root $(docker ps -q -f name=openproject.*worker) chown -R app:app /app/tmp/pids 2>/dev/null || true
+    fi
+    
+    echo -e "${GREEN}INFO: Container internal permission fixes applied.${NC}"
+    echo -e "${YELLOW}--- Container Permission Fixes Complete ---${NC}"
+}
+
+# Fix directory permissions before deployment
+fixdirs() {
+    fix_permissions
+}
+
+# Check if Docker is installed and running (updated function name)
+check_docker() {
+    echo -e "${BLUE}INFO: Checking Docker daemon status...${NC}"
+    if ! docker info >/dev/null 2>&1; then
+        echo -e "${RED}ERROR: Docker is not running. Please start Docker first.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}INFO: Docker daemon is running.${NC}"
+}
+
+# Deploy OpenProject
+deploy() {
+    ensure_docker_daemon
+    echo -e "${YELLOW}--- Starting OpenProject Deployment ---${NC}"
+    
+    # Apply permission fixes before deployment
+    fix_permissions
+    
+    echo -e "${BLUE}INFO: Starting OpenProject services...${NC}"
+    cd openproject && docker compose up -d --build --pull always
+    
+    # Wait a moment for containers to start
+    echo -e "${BLUE}INFO: Waiting for containers to initialize...${NC}"
+    sleep 30
+    
+    # Apply container-level permission fixes
+    fix_container_permissions
+    
+    echo -e "${GREEN}INFO: OpenProject deployment completed.${NC}"
+    echo -e "${YELLOW}--- Deployment Complete ---${NC}"
+}
+
 # --- Main Logic ---
 ACTION=$1
 
 if [ -z "$ACTION" ]; then
-    echo "Usage: $0 {deploy|reset|start|stop|status|logs [service_name]|fixdirs}"
+    echo "Usage: $0 {deploy|reset|start|stop|status|logs [service_name]|fixdirs|fixperms}"
+    echo ""
+    echo "Commands:"
+    echo "  deploy   - Full deployment with comprehensive permission fixes"
+    echo "  reset    - Stop, cleanup, and redeploy everything"
+    echo "  start    - Start services with permission fixes"
+    echo "  stop     - Stop all services"
+    echo "  status   - Show container status"
+    echo "  logs     - Show container logs (optionally for specific service)"
+    echo "  fixdirs  - Fix host directory permissions only"
+    echo "  fixperms - Fix running container permissions"
+    echo ""
+    echo "Note: This script includes comprehensive permission fixes for OpenProject Docker containers"
+    echo "      based on community best practices to resolve common permission issues."
     exit 1
 fi
 
@@ -125,51 +235,58 @@ ensure_docker_daemon
 
 case "$ACTION" in
     deploy|init)
-        echo "--- Initial Deploy/Setup ---"
-        stop_services # Stop if already running from a previous attempt
-        remove_old_named_volumes
-        setup_host_directories
-        start_services
-        echo "--- Deployment initiated. ---"
+        # Use the new improved deploy function
+        deploy
         ;;
     reset)
-        echo "--- Full Reset ---"
+        echo -e "${YELLOW}--- Full Reset ---${NC}"
         stop_services
-        echo "INFO: Removing old named volumes (if any)..."
+        echo -e "${BLUE}INFO: Removing old named volumes (if any)...${NC}"
         remove_old_named_volumes
-        echo "INFO: Re-setting up host directories and permissions..."
+        echo -e "${BLUE}INFO: Re-setting up host directories and permissions...${NC}"
         setup_host_directories # Re-create and re-apply permissions
+        fix_permissions # Apply new permission fixes
         start_services
-        echo "--- Reset and deployment initiated. ---"
+        echo -e "${GREEN}--- Reset and deployment initiated. ---${NC}"
         ;;
     start)
-        echo "--- Starting Services ---"
-        # Assuming host directories are already set up and have correct permissions
+        echo -e "${YELLOW}--- Starting Services ---${NC}"
+        # Apply permission fixes before starting
+        fix_permissions
         start_services
-        echo "--- Start command issued. ---"
+        # Apply container-level permission fixes after starting
+        sleep 20
+        fix_container_permissions
+        echo -e "${GREEN}--- Start command completed. ---${NC}"
         ;;
     stop)
-        echo "--- Stopping Services ---"
+        echo -e "${YELLOW}--- Stopping Services ---${NC}"
         stop_services
-        echo "--- Services stopped. ---"
+        echo -e "${GREEN}--- Services stopped. ---${NC}"
         ;;
     status)
-        echo "--- Service Status ---"
+        echo -e "${YELLOW}--- Service Status ---${NC}"
         show_status
         ;;
     logs)
-        echo "--- Service Logs ---"
+        echo -e "${YELLOW}--- Service Logs ---${NC}"
         show_logs "$2" # Pass the service name (optional second argument)
         ;;
     fixdirs)
-        echo "--- Fixing Host Directory Permissions Only ---"
+        echo -e "${YELLOW}--- Fixing Host Directory Permissions Only ---${NC}"
         # This action can be used if services are down and you only want to re-apply permissions
         setup_host_directories
-        echo "--- Directory permissions re-applied. You may need to restart services. ---"
+        fix_permissions
+        echo -e "${GREEN}--- Directory permissions re-applied. You may need to restart services. ---${NC}"
+        ;;
+    fixperms)
+        echo -e "${YELLOW}--- Fixing Container Permissions (Running Containers) ---${NC}"
+        fix_container_permissions
+        echo -e "${GREEN}--- Container permission fixes applied. ---${NC}"
         ;;
     *)
-        echo "ERROR: Invalid action '$ACTION'"
-        echo "Usage: $0 {deploy|reset|start|stop|status|logs [service_name]|fixdirs}"
+        echo -e "${RED}ERROR: Invalid action '$ACTION'${NC}"
+        echo "Usage: $0 {deploy|reset|start|stop|status|logs [service_name]|fixdirs|fixperms}"
         exit 1
         ;;
 esac
