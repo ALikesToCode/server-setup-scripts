@@ -71,7 +71,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - /opt/openproject_data/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 30s
@@ -98,7 +98,7 @@ services:
       --maxmemory ${REDIS_MAXMEMORY:-512mb}
       --maxmemory-policy allkeys-lru
     volumes:
-      - redis_data:/data
+      - /opt/openproject_data/redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 30s
@@ -125,7 +125,7 @@ services:
       OPENPROJECT_WEB__WORKERS: ${OPENPROJECT_WEB__WORKERS:-4}
       OPENPROJECT_WEB__TIMEOUT: ${OPENPROJECT_WEB__TIMEOUT:-120}
     volumes:
-      - openproject_assets:/var/openproject/assets
+      - /opt/openproject_data/assets:/var/openproject/assets
     depends_on:
       db:
         condition: service_healthy
@@ -155,7 +155,7 @@ services:
       <<: *openproject_base_env
       OPENPROJECT_WORKER__CONCURRENCY: ${OPENPROJECT_WORKER__CONCURRENCY:-10}
     volumes:
-      - openproject_assets:/var/openproject/assets
+      - /opt/openproject_data/assets:/var/openproject/assets
     depends_on:
       db:
         condition: service_healthy
@@ -182,21 +182,21 @@ networks:
 
 # Persistent volumes with backup labels
 volumes:
-  postgres_data:
-    driver: local
-    labels:
-      backup: "true"
-      retention: "30d"
-  redis_data:
-    driver: local
-    labels:
-      backup: "true" # Redis data can be backed up, though often treated as cache
-      retention: "7d"
-  openproject_assets:
-    driver: local
-    labels:
-      backup: "true"
-      retention: "30d"
+  # postgres_data:  # REMOVE or comment out
+  #   driver: local
+  #   labels:
+  #     backup: "true"
+  #     retention: "30d"
+  # redis_data: # REMOVE or comment out
+  #   driver: local
+  #   labels:
+  #     backup: "true" # Redis data can be backed up, though often treated as cache
+  #     retention: "7d"
+  # openproject_assets: # REMOVE or comment out
+  #   driver: local
+  #   labels:
+  #     backup: "true"
+  #     retention: "30d"
   prometheus_data:
     driver: local
   grafana_data:
