@@ -67,7 +67,7 @@ x-openproject-base-env: &openproject_base_env
 services:
   # PostgreSQL Database
   db:
-    image: postgres:${POSTGRES_VERSION:-16-alpine}
+    image: postgres:${POSTGRES_VERSION:-13-alpine}
     <<: [*restart_policy, *logging, *security_defaults]
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
